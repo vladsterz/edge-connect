@@ -2,11 +2,12 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from .dataset import Dataset
+# from .dataset import Dataset
 from .models import EdgeModel, InpaintingModel
 from .utils import Progbar, create_dir, stitch_images, imsave
 from .metrics import PSNR, EdgeAccuracy
-
+from .structured3D_train import DatasetStructure3D
+from .visualization import VisdomVisualizer
 
 class EdgeConnect():
     def __init__(self, config):
@@ -33,9 +34,10 @@ class EdgeConnect():
         if self.config.MODE == 2:
             self.test_dataset = Dataset(config, config.TEST_FLIST, config.TEST_EDGE_FLIST, config.TEST_MASK_FLIST, augment=False, training=False)
         else:
-            self.train_dataset = Dataset(config, config.TRAIN_FLIST, config.TRAIN_EDGE_FLIST, config.TRAIN_MASK_FLIST, augment=True, training=True)
-            self.val_dataset = Dataset(config, config.VAL_FLIST, config.VAL_EDGE_FLIST, config.VAL_MASK_FLIST, augment=False, training=True)
-            self.sample_iterator = self.val_dataset.create_iterator(config.SAMPLE_SIZE)
+            self.train_dataset = DatasetStructure3D(r"D:\VCL\Users\vlad\Datasets\Structure3D\Structure3D\Structured3D_reformated")
+            #self.train_dataset = Dataset(config, config.TRAIN_FLIST, config.TRAIN_EDGE_FLIST, config.TRAIN_MASK_FLIST, augment=True, training=True)
+            #self.val_dataset = Dataset(config, config.VAL_FLIST, config.VAL_EDGE_FLIST, config.VAL_MASK_FLIST, augment=False, training=True)
+            #self.sample_iterator = self.val_dataset.create_iterator(config.SAMPLE_SIZE)
 
         self.samples_path = os.path.join(config.PATH, 'samples')
         self.results_path = os.path.join(config.PATH, 'results')
@@ -84,6 +86,7 @@ class EdgeConnect():
         model = self.config.MODEL
         max_iteration = int(float((self.config.MAX_ITERS)))
         total = len(self.train_dataset)
+        torch.autograd.set_detect_anomaly(True)
 
         if total == 0:
             print('No training data was provided! Check \'TRAIN_FLIST\' value in the configuration file.')
@@ -94,12 +97,32 @@ class EdgeConnect():
             print('\n\nTraining epoch: %d' % epoch)
 
             progbar = Progbar(total, width=20, stateful_metrics=['epoch', 'iter'])
-
+            
+            
+            if model == 1:
+                viz = VisdomVisualizer("EdgeConnect_edge_" + str(epoch))
+            elif model == 2:
+                viz = VisdomVisualizer("EdgeConnect_inpaint_" + str(epoch))
+            elif model == 3:
+                viz = VisdomVisualizer("EdgeConnect_edgeinpaint_" + str(epoch))
+            else:
+                viz = VisdomVisualizer("EdgeConnect_joint_" + str(epoch))
             for items in train_loader:
                 self.edge_model.train()
                 self.inpaint_model.train()
 
                 images, images_gray, edges, masks = self.cuda(*items)
+                images_gray.unsqueeze_(1)
+                edges.unsqueeze_(1)
+                masks.unsqueeze_(1)
+                #images, images_gray, edges, masks = images.float(), images_gray.unsqueeze(1).float(), edges.unsqueeze(1).float(), masks.unsqueeze(1).float()
+                # import cv2
+                # cv2.imshow("image",images[0].permute(1,2,0).cpu().numpy())
+                # cv2.imshow("image_gray",images_gray[0].cpu().numpy())
+                # cv2.imshow("edges",edges[0].cpu().numpy())
+                # cv2.imshow("masks",masks[0].permute(1,2,0).cpu().numpy())
+
+                # cv2.waitKey(0)
 
                 # edge model
                 if model == 1:
@@ -114,6 +137,19 @@ class EdgeConnect():
                     # backward
                     self.edge_model.backward(gen_loss, dis_loss)
                     iteration = self.edge_model.iteration
+
+                    # log model at checkpoints
+                    if self.config.LOG_INTERVAL and iteration % self.config.LOG_INTERVAL == 0:
+                        # self.log(logs)
+                        for l in logs:
+                            viz.append_loss(epoch, iteration, l[1], l[0], mode = "val")
+                        viz.append_loss(epoch, iteration, gen_loss, "gen_loss")
+                        viz.append_loss(epoch, iteration, dis_loss, "dis_loss")
+
+                        viz.show_images(images, "images")
+                        viz.show_images(edges, "edges")
+                        viz.show_images(masks, "masks")
+                        viz.show_images(outputs, "outputs")
 
 
                 # inpaint model
@@ -192,8 +228,17 @@ class EdgeConnect():
                 progbar.add(len(images), values=logs if self.config.VERBOSE else [x for x in logs if not x[0].startswith('l_')])
 
                 # log model at checkpoints
-                if self.config.LOG_INTERVAL and iteration % self.config.LOG_INTERVAL == 0:
-                    self.log(logs)
+                # if self.config.LOG_INTERVAL and iteration % self.config.LOG_INTERVAL == 0:
+                #     # self.log(logs)
+                #     for l in logs:
+                #         viz.append_loss(epoch, iteration, l[1], l[0], mode = "val")
+                    
+                #     viz.show_images(images, "images")
+                #     viz.show_images(edges, "edges")
+                #     viz.show_images(masks, "masks")
+                #     viz.show_images(outputs_merged, "outputs_merged")
+                    
+
 
                 # sample model at checkpoints
                 if self.config.SAMPLE_INTERVAL and iteration % self.config.SAMPLE_INTERVAL == 0:
@@ -406,7 +451,7 @@ class EdgeConnect():
             f.write('%s\n' % ' '.join([str(item[1]) for item in logs]))
 
     def cuda(self, *args):
-        return (item.to(self.config.DEVICE) for item in args)
+        return (item.to(self.config.DEVICE).float() for item in args)
 
     def postprocess(self, img):
         # [0, 1] => [0, 255]
